@@ -3,12 +3,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { PROVIDERS, streamChat } from './providers.js';
 import { buildSystemPrompt, listModes } from './modes/index.js';
+import { trimMessages } from './trim.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
-const MAX_MESSAGES = 30; // basit bağlam kırpma, sonra geliştireceğiz
-const MAX_CHARS = 200000;
+// Bu modlarda düşünen modeller daha derin düşünsün, diğerlerinde hızlı ve limit dostu kalsın
+const DEEP_MODES = new Set(['hata-bul', 'mantik-hatasi']);
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -43,23 +44,12 @@ function validate(body) {
   return null;
 }
 
-function trimMessages(messages) {
-  let list = messages.slice(-MAX_MESSAGES);
-  let total = list.reduce((n, m) => n + m.content.length, 0);
-  while (list.length > 1 && total > MAX_CHARS) {
-    total -= list[0].content.length;
-    list = list.slice(1);
-  }
-  // Konuşma her zaman kullanıcı mesajıyla başlamalı
-  while (list.length > 1 && list[0].role !== 'user') list = list.slice(1);
-  return list;
-}
-
 app.post('/api/chat', async (req, res) => {
   const error = validate(req.body);
   if (error) return res.status(400).json({ error });
 
   const { provider, apiKey, model, mode, messages } = req.body;
+  const p = PROVIDERS[provider];
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -77,9 +67,10 @@ app.post('/api/chat', async (req, res) => {
     await streamChat({
       provider,
       apiKey,
-      model: (model && String(model).trim()) || PROVIDERS[provider].defaultModel,
+      model: (model && String(model).trim()) || p.defaultModel,
       system: buildSystemPrompt(mode),
-      messages: trimMessages(messages),
+      messages: trimMessages(messages, p.historyBudget),
+      effort: DEEP_MODES.has(mode) ? 'medium' : 'low',
       signal: controller.signal,
       onText: (t) => send({ t }),
     });
