@@ -1,5 +1,14 @@
 // Sağlayıcı listesi + her sağlayıcıya akışlı (streaming) istek atan fonksiyonlar.
 // Anahtar sadece istek sırasında kullanılır, hiçbir yere yazılmaz.
+//
+// Sağlayıcı ayarları:
+//   maxOutput       -> cevap için en fazla token
+//   maxTokensParam  -> o sağlayıcının bu ayara verdiği isim
+//   historyBudget   -> sohbet geçmişine ayrılan tahmini token payı
+//   reasoningModels -> reasoning_effort gönderilecek modellerin adı (regex)
+//   noTemperature   -> temperature kabul etmeyen modellerin adı (regex)
+
+export const TEMPERATURE = 0.3;
 
 export const PROVIDERS = {
   groq: {
@@ -8,6 +17,10 @@ export const PROVIDERS = {
     url: 'https://api.groq.com/openai/v1/chat/completions',
     defaultModel: 'llama-3.3-70b-versatile',
     keyHelp: 'console.groq.com',
+    maxOutput: 4096,
+    maxTokensParam: 'max_completion_tokens',
+    historyBudget: 1500,
+    reasoningModels: /gpt-oss/i,
   },
   gemini: {
     label: 'Google Gemini',
@@ -15,6 +28,9 @@ export const PROVIDERS = {
     url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
     defaultModel: 'gemini-2.5-flash',
     keyHelp: 'aistudio.google.com',
+    maxOutput: 8192, // düşünme token'ları da bu paydan yer
+    maxTokensParam: 'max_tokens',
+    historyBudget: 40000,
   },
   openai: {
     label: 'OpenAI (ChatGPT)',
@@ -22,6 +38,10 @@ export const PROVIDERS = {
     url: 'https://api.openai.com/v1/chat/completions',
     defaultModel: 'gpt-4o-mini',
     keyHelp: 'platform.openai.com',
+    maxOutput: 4096,
+    maxTokensParam: 'max_completion_tokens',
+    historyBudget: 40000,
+    noTemperature: /^(o\d|gpt-5)/i,
   },
   openrouter: {
     label: 'OpenRouter',
@@ -29,6 +49,9 @@ export const PROVIDERS = {
     url: 'https://openrouter.ai/api/v1/chat/completions',
     defaultModel: 'openai/gpt-4o-mini',
     keyHelp: 'openrouter.ai',
+    maxOutput: 4096,
+    maxTokensParam: 'max_tokens',
+    historyBudget: 30000,
   },
   claude: {
     label: 'Claude (Anthropic)',
@@ -36,6 +59,8 @@ export const PROVIDERS = {
     url: 'https://api.anthropic.com/v1/messages',
     defaultModel: 'claude-haiku-5-5',
     keyHelp: 'console.anthropic.com',
+    maxOutput: 4096,
+    historyBudget: 40000,
   },
 };
 
@@ -96,7 +121,24 @@ async function failFromResponse(label, response) {
 }
 
 // OpenAI uyumlu: Groq, Gemini, OpenAI, OpenRouter
-async function streamOpenAI(p, { apiKey, model, system, messages, signal, onText }) {
+async function streamOpenAI(p, { apiKey, model, system, messages, effort, signal, onText }) {
+  const body = {
+    model,
+    stream: true,
+    messages: [{ role: 'system', content: system }, ...messages],
+  };
+
+  body[p.maxTokensParam || 'max_tokens'] = p.maxOutput;
+
+  if (!(p.noTemperature && p.noTemperature.test(model))) {
+    body.temperature = TEMPERATURE;
+  }
+
+  // reasoning_effort sadece düşünen modellerde çalışır, diğerlerinde hata verir
+  if (effort && p.reasoningModels && p.reasoningModels.test(model)) {
+    body.reasoning_effort = effort;
+  }
+
   const response = await fetch(p.url, {
     method: 'POST',
     signal,
@@ -104,11 +146,7 @@ async function streamOpenAI(p, { apiKey, model, system, messages, signal, onText
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      stream: true,
-      messages: [{ role: 'system', content: system }, ...messages],
-    }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) await failFromResponse(p.label, response);
 
@@ -132,7 +170,8 @@ async function streamAnthropic(p, { apiKey, model, system, messages, signal, onT
       model,
       system,
       messages,
-      max_tokens: 8192,
+      max_tokens: p.maxOutput,
+      temperature: TEMPERATURE,
       stream: true,
     }),
   });
