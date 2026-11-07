@@ -4,12 +4,13 @@ import { fileURLToPath } from 'url';
 import { PROVIDERS, streamChat } from './providers.js';
 import { buildSystemPrompt, listModes } from './modes/index.js';
 import { trimMessages } from './trim.js';
+import { getModels } from './models.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
-// Bu modlarda düşünen modeller daha derin düşünsün, diğerlerinde hızlı ve limit dostu kalsın
-const DEEP_MODES = new Set(['hata-bul', 'mantik-hatasi']);
+// Anahtar hata mesajlarında sızmasın
+const redact = (msg, key) => (key ? String(msg).split(key).join('***') : String(msg));
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -31,6 +32,19 @@ app.get('/api/providers', (req, res) => {
 
 // Arayüzdeki butonlar için (etiket + düzenlenebilir hazır prompt)
 app.get('/api/modes', (req, res) => res.json(listModes()));
+
+// Ücretsiz / ücretli model listesi. Anahtar sadece sağlayıcının model listesi için kullanılır.
+app.post('/api/models', async (req, res) => {
+  const { provider, apiKey, tier } = req.body || {};
+  if (!PROVIDERS[provider]) return res.status(400).json({ error: 'Geçersiz sağlayıcı' });
+
+  const key = typeof apiKey === 'string' ? apiKey : '';
+  try {
+    res.json(await getModels(provider, key, tier === 'paid' ? 'paid' : 'free'));
+  } catch (e) {
+    res.status(502).json({ error: redact(e.message || 'Hata', key) });
+  }
+});
 
 function validate(body) {
   const { provider, apiKey, messages } = body || {};
@@ -70,16 +84,15 @@ app.post('/api/chat', async (req, res) => {
       model: (model && String(model).trim()) || p.defaultModel,
       system: buildSystemPrompt(mode),
       messages: trimMessages(messages, p.historyBudget),
-      effort: DEEP_MODES.has(mode) ? 'medium' : 'low',
+      // Kod yazarken ve hata ararken düşünme seviyesi orta, sadece analizde düşük
+      effort: mode === 'analiz-et' ? 'low' : 'medium',
       signal: controller.signal,
       onText: (t) => send({ t }),
     });
     send({ done: true });
   } catch (e) {
     if (!controller.signal.aborted) {
-      // Anahtar hata mesajında sızmasın
-      const safe = String(e.message || 'Hata').split(apiKey).join('***');
-      send({ error: safe });
+      send({ error: redact(e.message || 'Hata', apiKey) });
     }
   } finally {
     clearInterval(ping);
